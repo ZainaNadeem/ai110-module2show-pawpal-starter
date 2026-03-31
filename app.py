@@ -7,20 +7,64 @@ st.session_state acts as the persistent "vault" that survives page reruns.
 
 import streamlit as st
 
-from pawpal_system import Owner, Pet, Task, Scheduler  # Step 1: import logic layer
+from pawpal_system import Owner, Pet, Task, Scheduler
 
 # ---------------------------------------------------------------------------
-# Step 2: Initialise session state — only runs the very first time
-# ---------------------------------------------------------------------------
-
-if "owner" not in st.session_state:
-    st.session_state.owner = None          # set after the owner form is submitted
-
-# ---------------------------------------------------------------------------
-# Page config
+# Page config (must be first Streamlit call)
 # ---------------------------------------------------------------------------
 
 st.set_page_config(page_title="PawPal+", page_icon="🐾", layout="centered")
+
+# ---------------------------------------------------------------------------
+# Session state initialisation — runs only the first time
+# ---------------------------------------------------------------------------
+
+if "owner" not in st.session_state:
+    st.session_state.owner = None
+if "last_plan" not in st.session_state:
+    st.session_state.last_plan = []
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+PRIORITY_BADGE = {"high": "🔴 High", "medium": "🟡 Medium", "low": "🟢 Low"}
+CATEGORY_ICON = {
+    "walk": "🦮", "feeding": "🍽️", "meds": "💊",
+    "grooming": "✂️", "enrichment": "🎾", "general": "📋",
+}
+
+
+def _budget_bar(owner: Owner) -> None:
+    """Render a colour-coded progress bar showing time budget usage."""
+    total = owner.total_task_minutes()
+    budget = owner.available_minutes
+    used_pct = min(total / budget, 1.0) if budget else 0
+
+    col_a, col_b, col_c = st.columns(3)
+    col_a.metric("Tasks total", f"{total} min")
+    col_b.metric("Budget", f"{budget} min")
+    delta = budget - total
+    col_c.metric("Remaining", f"{delta} min", delta=delta, delta_color="normal")
+
+    st.progress(used_pct)
+
+    if total > budget:
+        over = total - budget
+        st.warning(
+            f"⚠️ **Time conflict:** Your tasks total **{total} min** but you only have "
+            f"**{budget} min** available — that's **{over} min over budget**. "
+            "The scheduler will skip the lowest-priority tasks that don't fit. "
+            "Consider raising your time budget or removing lower-priority tasks."
+        )
+    elif used_pct >= 0.9:
+        st.info("📌 You're using more than 90 % of your time budget today.")
+
+
+# ---------------------------------------------------------------------------
+# Title
+# ---------------------------------------------------------------------------
+
 st.title("🐾 PawPal+")
 st.caption("Your daily pet care planning assistant.")
 
@@ -41,19 +85,21 @@ with st.form("owner_form"):
     submitted_owner = st.form_submit_button("Save owner")
 
 if submitted_owner:
-    # Preserve existing pets if the owner is being updated
     existing_pets = st.session_state.owner.pets if st.session_state.owner else []
     st.session_state.owner = Owner(name=owner_name, available_minutes=available_minutes)
     for pet in existing_pets:
         st.session_state.owner.add_pet(pet)
-    st.success(f"Owner saved: {owner_name} ({available_minutes} min available today)")
+    st.session_state.last_plan = []   # reset plan when owner changes
+    st.success(f"Owner saved: **{owner_name}** — {available_minutes} min available today.")
 
 if st.session_state.owner:
     o = st.session_state.owner
-    st.info(f"Current owner: **{o.name}** — {o.available_minutes} min budget — {len(o.pets)} pet(s) registered")
+    st.info(f"**{o.name}** · {o.available_minutes} min budget · {len(o.pets)} pet(s) registered")
 else:
     st.warning("Fill in your name above and click **Save owner** to get started.")
-    st.stop()   # nothing below makes sense without an owner
+    st.stop()
+
+owner: Owner = st.session_state.owner
 
 # ---------------------------------------------------------------------------
 # Section 2 — Add a pet
@@ -73,22 +119,27 @@ with st.form("pet_form"):
     submitted_pet = st.form_submit_button("Add pet")
 
 if submitted_pet:
-    # Step 3: wire the form to Owner.add_pet()
     new_pet = Pet(name=pet_name, species=species, age_years=int(age_years))
-    st.session_state.owner.add_pet(new_pet)
-    st.success(f"Added {pet_name} the {species}!")
+    owner.add_pet(new_pet)
+    st.session_state.last_plan = []
+    st.success(f"Added **{pet_name}** the {species}!")
 
-# Show registered pets
-owner: Owner = st.session_state.owner
 if owner.pets:
     st.subheader("Registered pets")
     for pet in owner.pets:
-        st.markdown(f"- **{pet.name}** ({pet.species}, {pet.age_years} yr) — {len(pet.tasks)} task(s)")
+        high = len(pet.get_tasks_by_priority("high"))
+        med  = len(pet.get_tasks_by_priority("medium"))
+        low  = len(pet.get_tasks_by_priority("low"))
+        st.markdown(
+            f"- **{pet.name}** ({pet.species}, {pet.age_years} yr) — "
+            f"{len(pet.tasks)} task(s): "
+            f"{PRIORITY_BADGE['high']} ×{high}  {PRIORITY_BADGE['medium']} ×{med}  {PRIORITY_BADGE['low']} ×{low}"
+        )
 else:
     st.info("No pets yet. Add one above.")
 
 # ---------------------------------------------------------------------------
-# Section 3 — Add a task to a pet
+# Section 3 — Add a care task
 # ---------------------------------------------------------------------------
 
 st.divider()
@@ -115,7 +166,6 @@ else:
         submitted_task = st.form_submit_button("Add task")
 
     if submitted_task:
-        # Step 3: wire to Pet.add_task()
         target_pet = next(p for p in owner.pets if p.name == target_pet_name)
         new_task = Task(
             title=task_title,
@@ -124,23 +174,35 @@ else:
             category=task_category,
         )
         target_pet.add_task(new_task)
-        st.success(f"Added '{task_title}' ({priority} priority, {duration} min) to {target_pet_name}.")
+        st.session_state.last_plan = []   # invalidate cached plan
+        st.success(
+            f"Added **{task_title}** ({PRIORITY_BADGE[priority]}, {duration} min) "
+            f"to {target_pet_name}."
+        )
 
-    # Show all tasks grouped by pet
+    # Task list sorted by urgency_score descending — mirrors scheduler order
     for pet in owner.pets:
-        if pet.tasks:
-            st.subheader(f"{pet.name}'s tasks")
-            rows = [
-                {
-                    "Title": t.title,
-                    "Category": t.category,
-                    "Duration (min)": t.duration_minutes,
-                    "Priority": t.priority,
-                    "Done": "✓" if t.completed else "",
-                }
-                for t in pet.tasks
-            ]
-            st.table(rows)
+        if not pet.tasks:
+            continue
+        st.subheader(f"{CATEGORY_ICON.get('general', '📋')} {pet.name}'s tasks (sorted by priority)")
+        sorted_tasks = sorted(pet.tasks, key=lambda t: t.urgency_score(), reverse=True)
+        rows = [
+            {
+                "Icon": CATEGORY_ICON.get(t.category, "📋"),
+                "Title": t.title,
+                "Category": t.category,
+                "Duration (min)": t.duration_minutes,
+                "Priority": PRIORITY_BADGE[t.priority],
+                "Done": "✓" if t.completed else "",
+            }
+            for t in sorted_tasks
+        ]
+        st.table(rows)
+
+    # Budget overview whenever tasks exist
+    if owner.total_task_minutes() > 0:
+        st.subheader("Time budget overview")
+        _budget_bar(owner)
 
 # ---------------------------------------------------------------------------
 # Section 4 — Generate the daily schedule
@@ -150,49 +212,67 @@ st.divider()
 st.header("4. Generate Today's Schedule")
 
 all_tasks_count = sum(len(p.tasks) for p in owner.pets)
-total_task_min = owner.total_task_minutes()
-
-col_a, col_b = st.columns(2)
-col_a.metric("Total task time", f"{total_task_min} min")
-col_b.metric("Time budget", f"{owner.available_minutes} min")
 
 if all_tasks_count == 0:
     st.info("Add at least one task before generating a schedule.")
 else:
     if st.button("Generate schedule", type="primary"):
-        scheduler = Scheduler(owner=owner, day_start_minute=8 * 60)  # starts at 8:00 AM
+        scheduler = Scheduler(owner=owner, day_start_minute=8 * 60)
         plan = scheduler.build_full_plan()
+        st.session_state.last_plan = plan
 
-        if plan:
-            st.success(f"Scheduled {len(plan)} task(s) across your pets.")
-            st.subheader("Today's Plan")
-            for st_task in plan:
-                done_icon = "✅" if st_task.task.completed else "🔲"
+    plan = st.session_state.last_plan
+
+    if plan:
+        scheduled_min = sum(s.task.duration_minutes for s in plan)
+        st.success(
+            f"Scheduled **{len(plan)} task(s)** using **{scheduled_min} of "
+            f"{owner.available_minutes} min** available."
+        )
+
+        # ── Priority summary strip ──────────────────────────────────────────
+        high_ct  = sum(1 for s in plan if s.task.priority == "high")
+        med_ct   = sum(1 for s in plan if s.task.priority == "medium")
+        low_ct   = sum(1 for s in plan if s.task.priority == "low")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("🔴 High-priority tasks", high_ct)
+        c2.metric("🟡 Medium-priority tasks", med_ct)
+        c3.metric("🟢 Low-priority tasks", low_ct)
+
+        # ── Timeline ───────────────────────────────────────────────────────
+        st.subheader("Today's Plan")
+        for item in plan:
+            icon = CATEGORY_ICON.get(item.task.category, "📋")
+            badge = PRIORITY_BADGE[item.task.priority]
+            done_icon = "✅" if item.task.completed else "🔲"
+            st.markdown(
+                f"{done_icon} **{item.time_label()}**  ·  {icon} "
+                f"*{item.pet_name}*: **{item.task.title}**  "
+                f"· {badge} · {item.task.duration_minutes} min"
+            )
+            with st.expander("Why was this task scheduled?"):
+                st.write(item.reason)
+
+        # ── Full text explanation ───────────────────────────────────────────
+        with st.expander("Full plain-text plan"):
+            scheduler_obj = Scheduler(owner=owner, day_start_minute=8 * 60)
+            st.code(scheduler_obj.explain_plan(plan))
+
+        # ── Conflict / skipped-task warning ────────────────────────────────
+        scheduled_ids = {id(s.task) for s in plan}
+        skipped = [
+            (p.name, t)
+            for p in owner.pets
+            for t in p.tasks
+            if id(t) not in scheduled_ids
+        ]
+        if skipped:
+            st.warning("⚠️ **Tasks not scheduled** (didn't fit in today's time budget):")
+            for pet_name, task in skipped:
                 st.markdown(
-                    f"{done_icon} **{st_task.time_label()}** — "
-                    f"*{st_task.pet_name}*: {st_task.task.title} "
-                    f"({st_task.task.duration_minutes} min, {st_task.task.priority} priority)"
-                )
-                with st.expander("Why this task?"):
-                    st.write(st_task.reason)
-
-            # Full text explanation
-            with st.expander("Full plan explanation"):
-                scheduler_obj = Scheduler(owner=owner, day_start_minute=8 * 60)
-                st.code(scheduler_obj.explain_plan(plan))
-
-            # Warn about unscheduled tasks
-            scheduled_titles = {st_t.task.title for st_t in plan}
-            skipped = [
-                f"{p.name}: {t.title}"
-                for p in owner.pets
-                for t in p.tasks
-                if t.title not in scheduled_titles
-            ]
-            if skipped:
-                st.warning(
-                    "The following tasks didn't fit in today's time budget:\n"
-                    + "\n".join(f"- {s}" for s in skipped)
+                    f"- **{pet_name}**: {task.title} "
+                    f"({PRIORITY_BADGE[task.priority]}, {task.duration_minutes} min)  \n"
+                    f"  *Tip: raise your time budget or lower-priority tasks to make room.*"
                 )
         else:
-            st.error("No tasks could be scheduled. Check that tasks fit within your time budget.")
+            st.success("All tasks fit within today's time budget!")
