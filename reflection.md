@@ -2,10 +2,25 @@
 
 ## 1. System Design
 
+### Three core user actions
+
+1. **Add a pet** — the owner enters basic info about themselves (name, available time per day) and their pet (name, species, age) so the system knows who it is planning for.
+2. **Add and edit care tasks** — the owner creates tasks like "morning walk", "feeding", or "give medication", specifying how long each takes and how important it is (priority: low / medium / high).
+3. **Generate and view today's schedule** — the system produces an ordered daily plan that fits within the owner's available time, shows when each task starts and ends, and explains why each task was included.
+
+---
+
 **a. Initial design**
 
-- Briefly describe your initial UML design.
-- What classes did you include, and what responsibilities did you assign to each?
+The initial UML includes four classes:
+
+- **Task** (dataclass) — holds a single care activity: title, duration in minutes, priority level, and category. Exposes an `urgency_score()` method that maps priority to a numeric value so the Scheduler can sort tasks.
+- **ScheduledTask** (dataclass) — wraps a Task with a concrete start and end time (minutes since midnight) and a human-readable reason string. The `time_label()` method formats the window as "8:00 AM – 8:20 AM".
+- **Pet** — holds the pet's name, species, and age, plus a list of Task objects. Provides `add_task`, `remove_task`, and `get_tasks_by_priority` to manage the task list.
+- **Owner** — holds the owner's name and their total available minutes for the day, plus a list of Pet objects. Provides `add_pet`, `remove_pet`, and `total_task_minutes` (sums all tasks across all pets).
+- **Scheduler** — the central logic class. Receives an Owner and a day-start time, then calls `build_plan(pet)` to produce a list of ScheduledTask objects sorted by urgency, stopping when the owner's time budget is exhausted. `explain_plan` turns that list into a readable summary.
+
+Relationships: Owner owns one or more Pets; each Pet has zero or more Tasks; Scheduler uses an Owner and creates ScheduledTask objects.
 
 **b. Design changes**
 
